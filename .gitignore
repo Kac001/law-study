@@ -1,0 +1,6 @@
+# law-study 推送仓库根配置：只跟踪这两个目录
+# 其余一律不入库：工作区说明文件（AGENTS/SOUL/USER/IDENTITY）、skills/、其他 10 个项目
+/*
+!/.gitignore
+!/law-study
+!/law-content

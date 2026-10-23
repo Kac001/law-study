@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="多课程学习系统：刑法总论等课程，零基础精讲，电脑手机随时学">
+<meta name="theme-color" content="#1f5d92">
+<title>我的课程 · 零基础学习</title>
+<link id="csslink" rel="stylesheet" href="styles.css?v=2.0">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231f5d92'/%3E%3Ctext x='32' y='45' font-size='36' text-anchor='middle' fill='%23fff' font-family='sans-serif'%3E%E5%88%91%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- 顶部提示横幅（存储不可用 / 样式未加载等，可关闭） -->
+<div id="banner" class="banner" hidden></div>
+
+<!-- 顶栏 -->
+<header id="topbar" class="topbar">
+  <button id="backbtn" class="iconbtn" type="button" aria-label="返回" hidden>‹</button>
+  <div class="topbar-mid">
+    <div id="topbar-title" class="topbar-title">我的课程</div>
+    <div id="topbar-sub" class="topbar-sub">正在加载…</div>
+  </div>
+  <div class="topbar-actions">
+    <div id="userbtn" class="iconbtn" role="button" tabindex="0" aria-label="登录" title="登录">👤 登录</div>
+    <button id="fontbtn" class="iconbtn" type="button" aria-label="字体大小" title="字体大小">A＋</button>
+    <div id="themebtn" class="iconbtn themebtn" role="button" tabindex="0" aria-label="切换主题" title="切换主题">◐</div>
+  </div>
+</header>
+
+<!-- 当前视图 -->
+<main id="app" class="app" role="main" aria-live="polite"></main>
+
+<!-- 底部固定操作区（阅读页/自测页使用） -->
+<div id="bottombar" class="bottombar" hidden></div>
+
+<!-- 底部主导航 -->
+<nav id="tabbar" class="tabbar" aria-label="主导航">
+  <a class="tab" data-tab="toc" href="#/">📚<span>目录</span></a>
+  <a class="tab" data-tab="continue" href="#/continue">▶️<span>继续</span></a>
+  <a class="tab" data-tab="quiz" href="#/quiz">📝<span>自测</span></a>
+  <a class="tab" data-tab="drill" href="#/drill">✍️<span>刷题</span></a>
+  <a class="tab" data-tab="me" href="#/me">📈<span>我的</span></a>
+</nav>
+
+<!-- 主题菜单 -->
+<div id="thememenu" class="thememenu" hidden role="menu">
+  <button data-theme="light" type="button">☀️ 日间</button>
+  <button data-theme="sepia" type="button">📜 护眼</button>
+  <button data-theme="dark" type="button">🌙 夜间</button>
+</div>
+
+<script src="courses.js?v=1.0"></script>
+<script src="app.js?v=2.6"></script>
+</body>
+</html>
