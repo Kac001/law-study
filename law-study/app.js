@@ -278,11 +278,12 @@
   }
 
   function syncKind(kind) {
-    if (!AUTH.user || !COURSE) return Promise.resolve();
-    var courseId = COURSE.id;
+    if (!AUTH.user) return Promise.resolve();
+    if (kind !== "settings" && !COURSE) return Promise.resolve();   // settings 与课程无关，不因未进课程而丢
+    var courseId = COURSE ? COURSE.id : "";
     var payload = kind === "settings" ? settings : (kind === "drill" ? drill : state);
     var path = kind === "settings" ? "/api/settings" : "/api/data/" + kind + "/" + courseId;
-    return api(path, { method: "PUT", body: { data: payload, clientUpdatedAt: (payload && payload.updatedAt) || 0 } })
+    return api(path, { method: "PUT", body: { data: payload, clientUpdatedAt: (payload && payload.updatedAt) || 0, clientId: DEVICE_ID } })
       .then(function (res) {
         if (!res || !res.data) return;
         if (kind === "settings") {
@@ -290,7 +291,9 @@
           applyTheme(settings.theme); applyFont(settings.fontScale);
           try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
         } else if (kind === "drill") {
+          var running = (drill && drill.session) || null;
           drill = Object.assign(drill || {}, res.data);
+          if (running) drill.session = running;   // 合并结果不带进行中会话，不得顶掉（否则后续点选静默失效）
           try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) {}
         } else {
           state = Object.assign(state || {}, res.data);
@@ -315,18 +318,193 @@
       var sp = arr[0], sd = arr[1];
       if (sp && sp.data && Object.keys(sp.data).length) {
         // 仅在服务端更新时才覆盖本地，避免把本地更新的 lastSid 顶回去
-        var serverUp = Number(sp.updatedAt || sp.data.updatedAt || 0);
+        // 量纲：data.updatedAt 是毫秒（客户端写入），必须优先于行时间，否则永远判“本地更新”
+        var serverUp = Number(sp.data.updatedAt || sp.updatedAt || 0);
         var localUp = Number((state && state.updatedAt) || 0);
         if (serverUp >= localUp || !localUp) {
           state = Object.assign({}, sp.data);
           try { localStorage.setItem(progressKey(courseId), JSON.stringify(state)); } catch (e) {}
+        } else {
+          scheduleSync("progress");   // 本地更新：回推服务端收敛（如离线期间的进度）
         }
       }
       if (sd && sd.data && Object.keys(sd.data).length) {
-        drill = Object.assign({}, sd.data);
-        try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) {}
+        var serverDrillUp = Number(sd.data.updatedAt || sd.updatedAt || 0);
+        var localDrillUp = Number((drill && drill.updatedAt) || 0);
+        if (drill && drill.session) {
+          scheduleSync("drill");      // 刷题进行中不覆盖本地会话，但服务端需收敛
+        } else if (serverDrillUp >= localDrillUp || !localDrillUp) {
+          drill = Object.assign({}, sd.data);
+          try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) {}
+        } else {
+          scheduleSync("drill");
+        }
       }
     });
+  }
+
+  /* ========== 3.6 实时同步：WebSocket 主通道 + 拉取兜底 ========== */
+  var DEVICE_ID = (function () {
+    try {
+      var k = "app:deviceId:v1", v = localStorage.getItem(k);
+      if (v) return v;
+      v = "dev-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem(k, v);
+      return v;
+    } catch (e) { return "dev-" + Math.random().toString(36).slice(2, 10); }
+  })();
+  var WS_CONN = null, WS_RETRY = 0, WS_PING = null, WS_RETRY_TIMER = null, lastBgPull = 0;
+
+  function activeCourseId() {
+    if (COURSE && COURSE.id) return COURSE.id;
+    if (COURSE_ID_HINT) return COURSE_ID_HINT;
+    var list = (REG && REG.courses) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].default || list[i].isDefault) return list[i].id;
+    return list[0] ? list[0].id : "";
+  }
+
+  /* 应用远端数据：按 updatedAt 择新；不覆盖本端更新的、不打断进行中的刷题/自测 */
+  function applyRemote(msg) {
+    if (!msg || msg.type !== "data") return false;
+    var cid = msg.courseId || "", kind = msg.kind, up = Number((msg.data && msg.data.updatedAt) || msg.updatedAt || 0);
+    if (kind === "settings") {
+      if (!msg.data) return false;
+      var ns = { theme: msg.data.theme || "light", fontScale: Number(msg.data.fontScale) || 1 };
+      if (settings && settings.theme === ns.theme && Number(settings.fontScale) === ns.fontScale) return false;
+      settings = ns;
+      applyTheme(settings.theme); applyFont(settings.fontScale);
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+      return true;
+    }
+    if (kind !== "progress" && kind !== "drill") return false;
+    if (kind === "drill" && drill && drill.session) return false;      // 刷题进行中不被覆盖
+    var loaded = COURSE && COURSE.id === cid;
+    if (loaded) {
+      var cur = kind === "progress" ? state : drill;
+      if (cur && up && up < Number(cur.updatedAt || 0)) return false;  // 本端更新更优，忽略旧推
+      if (kind === "progress") {
+        state = Object.assign({}, msg.data);
+        try { localStorage.setItem(progressKey(cid), JSON.stringify(state)); } catch (e) {}
+      } else {
+        drill = Object.assign({}, msg.data);
+        try { localStorage.setItem(drillKey(cid), JSON.stringify(drill)); } catch (e) {}
+      }
+      var r = parseHash();
+      var inQuiz = (r.name === "quiz" && quizRun);
+      var inDrillRun = (r.name === "drill" && drill && drill.session && (r.parts || [])[0] === "run");
+      if (!inQuiz && !inDrillRun) { try { render(); } catch (e) {} }   // 作答中不打断（自测/刷题同等待遇）
+      return true;
+    }
+    // 非当前课程：只写本地副本，首页卡片计数重渲后即正确
+    try {
+      var key = kind === "progress" ? progressKey(cid) : drillKey(cid);
+      var old = JSON.parse(localStorage.getItem(key) || "null");
+      if (old && up && up < Number(old.updatedAt || 0)) return false;
+      localStorage.setItem(key, JSON.stringify(msg.data));
+    } catch (e) { return false; }
+    try { render(); } catch (e) {}
+    return true;
+  }
+
+  function onSyncMessage(msg) {
+    if (!msg || typeof msg !== "object") return false;
+    if (msg.type === "hello") { backgroundSync(true); return true; }   // 重连补拉，覆盖断线期间的改动
+    if (msg.type === "pong") return true;
+    if (msg.type === "data" && msg.senderId && msg.senderId === DEVICE_ID) return false;  // 跳过自己的回声
+    return applyRemote(msg);
+  }
+
+  /* 设置拉取：新设备/刷新后以服务端为准（本地不同时才应用） */
+  function pullSettings() {
+    if (!AUTH.user || AUTH.offlineGrant) return Promise.resolve(false);
+    return api("/api/settings").then(function (res) {
+      if (!res || !res.data || !Object.keys(res.data).length) return false;
+      return applyRemote({ type: "data", kind: "settings", courseId: "", senderId: "", updatedAt: Number(res.updatedAt || 0), data: res.data });
+    }).catch(function () { return false; });
+  }
+
+  /* 兜底：代理拦截 WS 或断线时回到拉取；首页/目录页都靠它保持最新 */
+  function backgroundSync(force) {
+    if (!AUTH.user || AUTH.offlineGrant) return Promise.resolve(false);
+    var cid = activeCourseId();
+    if (!cid) return Promise.resolve(false);
+    var now = Date.now();
+    if (!force && now - lastBgPull < 15000) return Promise.resolve(false);
+    lastBgPull = now;
+    return Promise.all([
+      api("/api/data/progress/" + cid).catch(function () { return null; }),
+      api("/api/data/drill/" + cid).catch(function () { return null; }),
+      pullSettings()
+    ]).then(function (arr) {
+      var changed = false;
+      if (arr[0] && arr[0].data && Object.keys(arr[0].data).length)
+        changed = applyRemote({ type: "data", kind: "progress", courseId: cid, senderId: "", updatedAt: Number(arr[0].updatedAt || 0), data: arr[0].data }) || changed;
+      if (arr[1] && arr[1].data && Object.keys(arr[1].data).length)
+        changed = applyRemote({ type: "data", kind: "drill", courseId: cid, senderId: "", updatedAt: Number(arr[1].updatedAt || 0), data: arr[1].data }) || changed;
+      return changed;
+    });
+  }
+
+  function wsEndpoint() { return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/sync"; }
+  function connectSync() {
+    if (typeof WebSocket !== "function") return false;             // 冒烟/老浏览器环境
+    if (typeof location === "undefined" || (location.protocol !== "http:" && location.protocol !== "https:")) return false;  // file:// 离线镜像不连
+    if (window && window.__NO_WS_SYNC__) return false;              // 测试环境显式禁用
+    if (WS_CONN && (WS_CONN.readyState === 0 || WS_CONN.readyState === 1)) return true;
+    if (!AUTH.user) return false;
+    var sock;
+    try { sock = new WebSocket(wsEndpoint()); } catch (e) { scheduleReconnect(); return false; }
+    WS_CONN = sock;
+    sock.onopen = function () {
+      WS_RETRY = 0;
+      clearInterval(WS_PING);
+      WS_PING = setInterval(function () {
+        try { if (WS_CONN && WS_CONN.readyState === 1) WS_CONN.send(JSON.stringify({ type: "ping" })); } catch (e) {}
+      }, 30000);
+    };
+    sock.onmessage = function (ev) {
+      var msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      try { onSyncMessage(msg); } catch (e) {}
+    };
+    sock.onerror = function () { try { sock.close(); } catch (e) {} };
+    sock.onclose = function () {
+      if (WS_CONN === sock) WS_CONN = null;
+      clearInterval(WS_PING); WS_PING = null;
+      scheduleReconnect();
+    };
+    return true;
+  }
+  function scheduleReconnect() {
+    if (!AUTH.user) return;
+    WS_RETRY = Math.min(WS_RETRY + 1, 6);
+    clearTimeout(WS_RETRY_TIMER);
+    var delay = Math.min(1000 * Math.pow(2, WS_RETRY - 1), 30000) + Math.floor(Math.random() * 800);
+    WS_RETRY_TIMER = setTimeout(function () { connectSync(); }, delay);
+  }
+  function flushSync() {     // 离开页面前把防抖中的推送立即发出，避免丢最后一笔
+    for (var k in syncTimers) {
+      if (!Object.prototype.hasOwnProperty.call(syncTimers, k) || !syncTimers[k]) continue;
+      clearTimeout(syncTimers[k]); syncTimers[k] = null;
+      try { syncKind(k); } catch (e) {}
+    }
+  }
+  var syncTriggersBound = false;
+  function bindSyncTriggers() {
+    if (syncTriggersBound || typeof document === "undefined") return;
+    syncTriggersBound = true;
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") backgroundSync(false);
+    });
+    if (window && window.addEventListener) {
+      window.addEventListener("focus", function () { backgroundSync(false); });
+      window.addEventListener("online", function () { backgroundSync(true); connectSync(); });
+      window.addEventListener("pagehide", flushSync);
+    }
+  }
+  function closeSync() {      // 登出时断开；重连受 AUTH.user 门槛保护不会复活
+    clearTimeout(WS_RETRY_TIMER);
+    clearInterval(WS_PING);
+    if (WS_CONN) { try { WS_CONN.onclose = null; WS_CONN.close(); } catch (e) {} WS_CONN = null; }
   }
 
   /* ========== 4. 横幅 / 主题 / 字号 ========== */
@@ -485,9 +663,13 @@
       if (!useFetch) return loadCourseScript(cid).then(resolve, reject);
       Promise.all([
         fetch("courses/" + cid + "/content.json").then(function (r) { if (!r.ok) throw new Error("内容包 404"); return r.json(); }),
-        fetch("courses/" + cid + "/bank.json").then(function (r) { if (!r.ok) throw new Error("题库 404"); return r.json(); })
+        fetch("courses/" + cid + "/bank.json").then(function (r) { if (!r.ok) throw new Error("题库 404"); return r.json(); }),
+        // 法条正文（可选）：旧课程包/夹具没有此文件，404 时降级为只显示条号
+        fetch("courses/" + cid + "/articles.json")
+          .then(function (r) { return r.ok ? r.json() : {}; })
+          .catch(function () { return {}; })
       ]).then(function (arr) {
-        courseCache[cid] = { content: arr[0], bank: arr[1] };
+        courseCache[cid] = { content: arr[0], bank: arr[1], articles: (arr[2] && typeof arr[2] === "object") ? arr[2] : {} };
         resolve(courseCache[cid]);
       }).catch(function () { loadCourseScript(cid).then(resolve, reject); });
     });
@@ -619,7 +801,11 @@
     app.appendChild(h("div", { class: "small muted center", style: "margin-top:18px" }, "课程内容由学科导师生成，进度保存在本机"));
   }
 
+  var lastRenderHash = null;   // 上次渲染的路由：同路由重渲保持滚动（如「标记已学会」后），换页才回顶
   function render() {
+    var keepY = (window.scrollY || window.pageYOffset || 0);
+    var sameRoute = (lastRenderHash === location.hash);
+    lastRenderHash = location.hash;
     var app = $("#app");
     clear(app);
     setBottom(null);
@@ -640,7 +826,7 @@
     var fn = routes[r.name] || routes.toc;
     fn(r.parts);
     setTab();
-    window.scrollTo(0, 0);
+    window.scrollTo(0, sameRoute ? keepY : 0);   // 仅换页回顶；同页重渲保持原位置
   }
 
   /* 登录墙：未登录时替换任何视图 */
@@ -666,6 +852,9 @@
           var target = (r && r.courseId) ? ("#/c/" + r.courseId + (r.name && r.name !== "toc" ? "/" + r.name + (r.parts && r.parts.length ? "/" + r.parts.join("/") : "") : "")) : "#/";
           location.hash = target;
           render();
+          bindSyncTriggers();
+          connectSync();
+          backgroundSync(true);
         })
         .catch(function (e) {
           err.textContent = e.status === 401 ? "用户名或密码错误"
@@ -1150,6 +1339,7 @@
         h("button", { class: "btn", type: "button", style: "flex:1", onclick: function () {
           api("/api/auth/logout", { method: "POST" }).catch(function () {}).then(function () {
             AUTH.user = null; clearCachedSession(); COURSE = null; DATA = null; BANK = null; state = null; drill = null;
+            closeSync();
             updateUserChip(); showBanner("已退出登录。"); render();
           });
         } }, "退出登录")
@@ -1172,7 +1362,7 @@
   var randomPick = { count: 20, chapters: null };
 
   function normalizeBank(raw) {
-    var b = { version: "", questions: [], byId: {}, byChapter: {}, total: 0 };
+    var b = { version: "", questions: [], byId: {}, byChapter: {}, total: 0, adv: [] };
     function push(q) {
       if (!q || !q.stem || !q.options || q.options.length < 2) return false;
       if (!q.id) q.id = "q-auto-" + b.questions.length;
@@ -1182,6 +1372,26 @@
       if (!b.byChapter[q.chapterId]) b.byChapter[q.chapterId] = [];
       b.byChapter[q.chapterId].push(q);
       return true;
+    }
+    /* 进阶题：独立数组，不计入基础池/每节题数约束，只进 byId 供作答解析 */
+    if (raw && Array.isArray(raw.advQuestions)) {
+      raw.advQuestions.forEach(function (q) {
+        if (!q || !q.stem || !q.options || q.options.length < 2 || !q.id || b.byId[q.id]) return;
+        b.adv.push({
+          id: q.id,
+          chapterId: q.chapterId || "",
+          chapterTitle: q.chapterTitle || "",
+          type: q.type || (q.options.length === 2 ? "judge" : "single"),
+          difficulty: clamp(Number(q.difficulty) || 3, 1, 3),
+          stem: q.stem || q.q || "",
+          options: q.options.slice(),
+          answerRaw: q.answer,
+          explain: q.explain || "",
+          articles: q.articles || [],
+          tags: ["adv"]
+        });
+        b.byId[q.id] = b.adv[b.adv.length - 1];
+      });
     }
     if (raw && Array.isArray(raw.questions)) {
       b.version = (raw.meta && raw.meta.version) || "unknown";
@@ -1240,6 +1450,12 @@
       s.qstats = s.qstats || {};
       s.wrong = s.wrong || {};
       s.history = Array.isArray(s.history) ? s.history : [];
+      // session 归一化：字段残缺（旧版本残留/同步丢字段）直接丢弃，避免作答页锁死
+      var se = s.session;
+      if (se && (!Array.isArray(se.ids) || !se.ids.length || !Array.isArray(se.answers) ||
+          typeof se.idx !== "number" || typeof se.picked !== "number")) {
+        s.session = null;
+      }
       return s;
     } catch (e) { return fresh; }
   }
@@ -1303,6 +1519,8 @@
       pool = (BANK.byChapter[opts.chapterId] || []).slice();
     } else if (mode === "wrong") {
       pool = BANK.questions.filter(function (q) { return !!drill.wrong[q.id]; });
+    } else if (mode === "adv") {
+      pool = (BANK.adv || []).filter(function (q) { return !opts.chapters || opts.chapters.indexOf(q.chapterId) >= 0; });
     } else {
       pool = BANK.questions.filter(function (q) { return !opts.chapters || opts.chapters.indexOf(q.chapterId) >= 0; });
     }
@@ -1311,7 +1529,7 @@
     var picked = sample(pool, n);
     drill.session = {
       mode: mode,
-      label: opts.label || (mode === "chapter" ? "章节刷题" : mode === "wrong" ? "错题重刷" : "随机刷题"),
+      label: opts.label || (mode === "chapter" ? "章节刷题" : mode === "wrong" ? "错题重刷" : mode === "adv" ? "进阶刷题" : "随机刷题"),
       ids: picked.map(function (q) { return q.id; }),
       idx: 0,
       answers: [],
@@ -1376,6 +1594,16 @@
         h("div", { class: "mode-foot" }, ds.wrong ? ds.wrong + " 道待攻克" : "暂无错题")
       ])
     ]));
+
+    if (BANK.adv && BANK.adv.length) {
+      app.appendChild(h("div", { class: "section-block", style: "margin-top:14px" }, [
+        h("div", { class: "card tap", onclick: function () { startDrill("adv", { label: "进阶刷题" }); } }, [
+          h("div", { class: "mode-title" }, "🎯 进阶刷题"),
+          h("div", { class: "mode-desc" }, "法考风格案例题：案情 → 争点 → 涵摄结论"),
+          h("div", { class: "mode-foot" }, BANK.adv.length + " 道进阶题")
+        ])
+      ]));
+    }
   }
 
   function renderChapterPick() {
@@ -1544,10 +1772,11 @@
   function pickDrillAnswer(oi) {
     var s = drill.session;
     if (!s || s.picked >= 0) return;
+    var q = BANK.byId[(s.ids || [])[s.idx]];
+    if (!q) return;                          // 题目缺失：不置 picked，按钮保持可用
+    s.answers = Array.isArray(s.answers) ? s.answers : [];   // 兜底：残缺会话不吞点击
     s.picked = oi;
     s.answers[s.idx] = oi;
-    var q = BANK.byId[s.ids[s.idx]];
-    if (!q) return;
     var ai = answerIndex(q);
     var st = drill.qstats[q.id] || (drill.qstats[q.id] = { r: 0, w: 0, last: 0 });
     if (oi === ai) {
@@ -1815,6 +2044,9 @@
           updateUserChip();
           if (AUTH.offlineGrant) showBanner("离线模式：使用本机会话进入，联网后自动校验并同步。");
           render();
+          bindSyncTriggers();
+          connectSync();
+          backgroundSync(true);      // 启动即拉一次，首页/目录页不再显示旧位置
         });
     }).catch(function () {
       var app = $("#app"); clear(app);

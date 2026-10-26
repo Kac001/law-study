@@ -114,6 +114,8 @@ async function boot(opts) {
   opts = opts || {};
   const warns = [];
   const env = install(makeEnv({ ids: IDS, protocol: opts.protocol || 'file:', storageThrows: !!opts.storageThrows }));
+  // 冒烟环境没有真实服务端：禁用 WebSocket 实时通道，避免 Node 内置 WebSocket 反复重连把进程挂住
+  env.win.__NO_WS_SYNC__ = true;
   global.window = env.win; global.document = env.doc;
   global.location = env.win.location;
   global.localStorage = env.win.localStorage;
@@ -212,6 +214,15 @@ async function scenario(name, opts) {
       const banner = env.registry.ids['banner'];
       ok('[' + name + '] 存储禁用显示横幅', banner && !banner.hidden && /无法保存/.test(banner.textContent), banner && banner.textContent);
     }
+    // 标记后同路由重渲不得回顶（移动端长章节尤甚）
+    const calls = [];
+    const origST = env.win.scrollTo;
+    env.win.scrollY = 321;
+    env.win.scrollTo = function (x, y) { calls.push([x, y]); };
+    (markBtn._handlers['click'] || []).forEach(fn => fn());
+    ok('[' + name + '] 标记后保持滚动位置', calls.some(c => c[1] === 321) && !calls.some(c => c[1] === 0), JSON.stringify(calls));
+    env.win.scrollTo = origST;
+    (markBtn._handlers['click'] || []).forEach(fn => fn());   // 再点一次恢复标记，不影响后续「清理已掌握」用例
   } else ok('[' + name + '] 阅读页有标记按钮', false);
 
   // renderMd 输出断言：富文本生成且无脚本注入面
@@ -398,8 +409,8 @@ async function loginWallScenario() {
 /* 法条正文（Bug2）：两门课的法条须覆盖节尾全部引用，且卡片渲染不出现缺失占位 */
 function articlesScenario() {
   const CASES = [
-    { id: 'constitutional-law', name: '宪法学', want: 58, sections: 60 },
-    { id: 'criminal-law-general', name: '刑法总论', want: 92, sections: 71 }
+    { id: 'constitutional-law', name: '宪法学', want: 58, sections: 63 },
+    { id: 'criminal-law-general', name: '刑法总论', want: 92, sections: 74 }
   ];
   const grab = (s, name) => {
     const st = s.indexOf('function ' + name + '(');
@@ -493,8 +504,8 @@ function typographyScenario() {
     secs++; h4 += n;
     if (n !== 6 || new RegExp('<p>' + LAB + '[：:]').test(html)) bad.push(s.id);
   }
-  ok('[排版] 宪法 60 节每节 6 个小标题', secs === 60 && bad.length === 0, { secs, bad: bad.slice(0, 4) });
-  ok('[排版] 宪法小标题总数 360', h4 === 360, h4);
+  ok('[排版] 宪法 63 节每节 6 个小标题', secs === 63 && bad.length === 0, { secs, bad: bad.slice(0, 4) });
+  ok('[排版] 宪法小标题总数 378', h4 === 378, h4);
   ok('[排版] 宪法段落不与标签粘连', !new RegExp('<p>' + LAB + '[：:]').test(R(cl.chapters[0].sections[0].body, { labels: true })));
 
   // 2) 刑法：与原渲染逐字节一致，h4 数等于源码 `###` 数
@@ -514,6 +525,99 @@ function typographyScenario() {
   ok('[排版] 启用标签后拆为标题+段落', R(lab, { labels: true }) === '<h4>对比</h4><p>甲乙之间的对比说明。</p>', R(lab, { labels: true }));
   ok('[排版] 启用标签仍走转义', !R('<img src=x onerror=alert(1)>', { labels: true }).includes('<img'));
   ok('[排版] 不吞列表', R('- 要点一', { labels: true }).includes('<li>要点一</li>'));
+}
+
+/* 法条正文·线上加载路径回归（本次线上事故根因）：
+ * https 模式走 fetch(content.json + bank.json)，法条正文只打进 course.js 镜像，
+ * 曾导致线上正文不显示、而镜像路径测试全绿。这里按线上真实取数路径复算。 */
+function articlesFetchScenario() {
+  const grab = (src, name) => {
+    const st = src.indexOf('function ' + name + '(');
+    if (st < 0) throw new Error('未找到函数 ' + name);
+    const ob = src.indexOf('{', st);
+    let d = 0;
+    for (let p = ob; p < src.length; p++) {
+      if (src[p] === '{') d++;
+      else if (src[p] === '}') { d--; if (!d) return src.slice(st, p + 1); }
+    }
+    throw new Error('未找到函数结束: ' + name);
+  };
+  const walk = (x, out) => { out = out || []; if (!x) return out; out.push(x); (x.children || []).forEach(c => walk(c, out)); return out; };
+  const pick = (root, cls) => walk(root).filter(e => typeof e.className === 'string' && e.className.split(/\s+/).indexOf(cls) >= 0);
+  const appSrc = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+  // renderLawSection 读的是闭包里的 ARTICLES，注入可切换的桩而不是传参数
+  const gate = eval('(function(){var ARTICLES={};' + grab(appSrc, 'esc') + '\n' + grab(appSrc, 'h') + '\n' + grab(appSrc, 'renderLawSection') + '\n;return {set:function(a){ARTICLES=(a&&typeof a==="object")?a:{};},render:function(list){return renderLawSection(list);}};})()');
+  const readJSON = (id, file) => JSON.parse(fs.readFileSync(path.join(ROOT, 'courses', id, file), 'utf8'));
+
+  // 1) 线上 https 分支必须真的去取 articles.json（防回退）
+  const branch = appSrc.slice(appSrc.indexOf('function loadCourse('), appSrc.indexOf('function migrateLegacy('));
+  ok('[线上法条] loadCourse fetch 分支包含 articles.json', /fetch\("courses\/" \+ cid \+ "\/articles\.json"\)/.test(branch));
+  ok('[线上法条] 缺失时静默降级', /\.catch\(function \(\) \{ return \{\}; \}\)/.test(branch));
+
+  // 2) 按线上真实取数组装 pack，逐节渲染，断言有正文、无“暂未收录”
+  const CASES = [
+    { id: 'constitutional-law', want: 123 },
+    { id: 'criminal-law-general', want: 138 }
+  ];
+  for (const cfg of CASES) {
+    const pack = {
+      content: readJSON(cfg.id, 'content.json'),
+      articles: readJSON(cfg.id, 'articles.json')
+    };
+    const A = pack.articles || {};
+    gate.set(A);
+    let cards = 0, withText = 0, missing = 0;
+    for (const ch of pack.content.chapters || []) for (const s of ch.sections || []) {
+      const r = gate.render(s.articles || []);
+      for (const c of pick(r, 'lawcard')) cards++;
+      for (const t of pick(r, 'lawtext')) if ((t.textContent || '').trim()) withText++;
+      missing += pick(r, 'lawmissing').length;
+    }
+    ok('[线上法条] ' + cfg.id + ' 卡片数 ' + cfg.want, cards === cfg.want, { cards, want: cfg.want });
+    ok('[线上法条] ' + cfg.id + ' 每卡都有正文', withText === cfg.want, { withText, want: cfg.want });
+    ok('[线上法条] ' + cfg.id + ' 无“暂未收录”占位', missing === 0, missing);
+  }
+
+  // 3) 404 降级：articles 缺失时退回标签样式，不报错、不留空卡
+  gate.set({});
+  const d = gate.render(['《宪法》第五条']);
+  ok('[线上法条] 无 articles 时退回标签', pick(d, 'lawsec').length === 0 && pick(d, 'lawmissing').length === 0);
+
+  // 4) 线上取数文件必须真实存在于托管目录（fetch 不能 404）
+  for (const id of ['constitutional-law', 'criminal-law-general']) {
+    const p = path.join(ROOT, 'courses', id, 'articles.json');
+    let n = 0;
+    try { n = Object.keys(JSON.parse(fs.readFileSync(p, 'utf8'))).length; } catch (e) { n = -1; }
+    ok('[线上法条] ' + id + '/articles.json 存在且非空', n > 0, n);
+  }
+}
+
+/* 实时同步：WS 主通道 + 拉取兜底。需防的是“功能被静默删掉”，故同时断言客户端与服务端接线。 */
+function realtimeSyncScenario() {
+  const appSrc = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+  const srvSrc = fs.readFileSync(path.join(ROOT, 'server', 'main.py'), 'utf8');
+  ok('[实时] 客户端连 /ws/sync', appSrc.indexOf('"/ws/sync"') >= 0);
+  ok('[实时] PUT 上报 clientId', appSrc.indexOf('clientId: DEVICE_ID') >= 0);
+  ok('[实时] 跳过自己的回声', /msg\.senderId === DEVICE_ID/.test(appSrc));
+  ok('[实时] 可见性/焦点兜底拉取', appSrc.indexOf('visibilitychange') >= 0 && appSrc.indexOf('addEventListener("focus"') >= 0);
+  ok('[实时] 离开前冲刷待发', appSrc.indexOf('addEventListener("pagehide", flushSync)') >= 0);
+  ok('[实时] 指数退避重连', /Math\.pow\(2, WS_RETRY - 1\)/.test(appSrc));
+  ok('[实时] file:// 不连（离线镜像）', appSrc.indexOf('location.protocol !== "http:"') >= 0);
+  ok('[实时] 服务端 WS 路由', srvSrc.indexOf('@app.websocket("/ws/sync")') >= 0);
+  ok('[实时] 服务端保存后广播', srvSrc.indexOf('_broadcast(user["id"]') >= 0);
+  ok('[实时] 广播携带 senderId', srvSrc.indexOf('"senderId": body.clientId') >= 0);
+  ok('[实时] 广播调度回事件循环', srvSrc.indexOf('call_soon_threadsafe') >= 0);
+  ok('[实时] 服务端 updatedAt 与 data 同量纲', srvSrc.indexOf('_logical_ts') >= 0);
+  ok('[实时] 收端择新优先 data.updatedAt', appSrc.indexOf('msg.data && msg.data.updatedAt') >= 0);
+  ok('[实时] 拉取优先毫秒量纲', appSrc.indexOf('sp.data.updatedAt || sp.updatedAt') >= 0);
+  ok('[实时] 本地更新回推收敛', /else \{\s*scheduleSync\("progress"\);\s*\/\/ 本地更新/.test(appSrc));
+  ok('[进阶] 题库独立数组 advQuestions', appSrc.indexOf('raw.advQuestions') >= 0 && appSrc.indexOf('b.adv.push') >= 0);
+  ok('[进阶] 刷题入口与作答池', appSrc.indexOf('进阶刷题') >= 0 && /mode === "adv"/.test(appSrc));
+  ok('[刷题] 会话归一化防锁死', /s\.session = null;/.test(appSrc) && /s\.answers = Array\.isArray\(s\.answers\)/.test(appSrc));
+  ok('[刷题] 作答页免远端重渲', /inDrillRun/.test(appSrc));
+  ok('[刷题] 同步回写不顶掉进行中会话', /if \(running\) drill\.session = running;/.test(appSrc));
+  ok('[实时] settings 不受未进课程限制', appSrc.indexOf('kind !== "settings" && !COURSE') >= 0);
+  ok('[实时] 新设备拉取服务端设置', appSrc.indexOf('api("/api/settings")') >= 0);
 }
 
 (async function main() {
@@ -537,6 +641,8 @@ function typographyScenario() {
   try { await loginWallScenario(); } catch (e) { ok('[登录墙] 场景不抛异常', false, String(e && e.stack || e)); }
   try { articlesScenario(); } catch (e) { ok('[法条] 场景不抛异常', false, String(e && e.stack || e)); }
   try { typographyScenario(); } catch (e) { ok('[排版] 场景不抛异常', false, String(e && e.stack || e)); }
+  try { articlesFetchScenario(); } catch (e) { ok('[线上法条] 场景不抛异常', false, String(e && e.stack || e)); }
+  try { realtimeSyncScenario(); } catch (e) { ok('[实时] 场景不抛异常', false, String(e && e.stack || e)); }
   console.log('检查项: ' + (pass + fail) + '  通过: ' + pass + '  失败: ' + fail);
   if (fail) { fails.forEach(f => console.log('  ✗ ' + f.name + (f.extra !== undefined ? '  → ' + JSON.stringify(f.extra) : ''))); process.exitCode = 1; }
   else console.log('  全部通过 ✓');

@@ -11,10 +11,10 @@
    "icon": "⚖️",
    "color": "#1f5d92",
    "chapters": 14,
-   "sections": 71,
-   "questions": 299,
+   "sections": 74,
+   "questions": 310,
    "version": "2026.10.1",
-   "updatedAt": "2026-10-23",
+   "updatedAt": "2026-10-25",
    "status": "ready"
   },
   {
@@ -26,10 +26,10 @@
    "icon": "📘",
    "color": "#1f5d92",
    "chapters": 12,
-   "sections": 60,
-   "questions": 240,
+   "sections": 63,
+   "questions": 252,
    "version": "2026.10.1",
-   "updatedAt": "2026-10-23",
+   "updatedAt": "2026-10-25",
    "status": "ready"
   }
  ]

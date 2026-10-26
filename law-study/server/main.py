@@ -1,10 +1,11 @@
 """FastAPI 应用：认证 + 进度同步 + 静态托管。"""
+import asyncio
 import json
 import os
 import time
 from typing import Optional
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -36,6 +37,7 @@ class CreateUserIn(BaseModel):
 class SyncIn(BaseModel):
     data: dict
     clientUpdatedAt: int = 0
+    clientId: str = Field(default="", max_length=64)   # 设备标识：广播回声据此跳过
 
 
 # ---------- 工具 ----------
@@ -43,10 +45,10 @@ def _now() -> int:
     return int(time.time())
 
 
-def current_user(request: Request) -> dict:
-    token = request.cookies.get(auth.COOKIE_NAME)
+def _user_by_token(token: str) -> Optional[dict]:
+    """按会话令牌取用户；无效返回 None（HTTP 与 WebSocket 共用）。"""
     if not token:
-        raise HTTPException(status_code=401, detail="未登录")
+        return None
     conn = db.get_conn()
     row = conn.execute(
         """SELECT u.id, u.username, u.display_name, u.is_admin
@@ -55,8 +57,16 @@ def current_user(request: Request) -> dict:
         (auth.token_hash(token), _now()),
     ).fetchone()
     if not row:
-        raise HTTPException(status_code=401, detail="会话已失效")
+        return None
     return dict(row)
+
+
+def current_user(request: Request) -> dict:
+    token = request.cookies.get(auth.COOKIE_NAME)
+    user = _user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="未登录" if not token else "会话已失效")
+    return user
 
 
 def admin_user(user: dict = Depends(current_user)) -> dict:
@@ -202,12 +212,25 @@ def _save_kind(user_id: int, kind: str, course_id: str, data: dict) -> int:
     return ts
 
 
+def _logical_ts(data: dict, row_ts: int) -> int:
+    """对外的 updatedAt 与 data.updatedAt 同量纲（毫秒）；行时间仅兑底换算。
+
+    客户端用 Date.now() 毫秒维护 data.updatedAt，比较/择新也用它；
+    若对外混用行时间（秒），收端会永远判定“本地更新”而拒绝服务端数据。
+    """
+    try:
+        v = int((data or {}).get("updatedAt") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v or int(row_ts) * 1000
+
+
 @app.get("/api/data/{kind}/{course_id}")
 def get_data(kind: str, course_id: str, user: dict = Depends(current_user)):
     if kind not in ALLOWED_KINDS:
         raise HTTPException(status_code=400, detail="未知数据类型")
     data, ts = _load_kind(user["id"], kind, course_id)
-    return {"ok": True, "data": data, "updatedAt": ts}
+    return {"ok": True, "data": data, "updatedAt": _logical_ts(data, ts)}
 
 
 @app.put("/api/data/{kind}/{course_id}")
@@ -220,23 +243,117 @@ def put_data(kind: str, course_id: str, body: SyncIn, user: dict = Depends(curre
     server, _ = _load_kind(user["id"], kind, course_id)
     merged = merge.merge_progress(server, body.data) if kind == "progress" else merge.merge_drill(server, body.data)
     ts = _save_kind(user["id"], kind, course_id, merged)
-    return {"ok": True, "data": merged, "updatedAt": ts}
+    up = _logical_ts(merged, ts)
+    _broadcast(user["id"], {
+        "type": "data",
+        "kind": kind,
+        "courseId": course_id,
+        "senderId": body.clientId,      # 收端据此跳过自己的回声
+        "data": merged,                 # 直接带合并结果，收端无需再拉
+        "updatedAt": up,                # 与 data.updatedAt 同量纲（毫秒）
+    })
+    return {"ok": True, "data": merged, "updatedAt": up}
 
 
 class SettingsIn(BaseModel):
     data: dict
+    clientId: str = Field(default="", max_length=64)
 
 
 @app.get("/api/settings")
 def get_settings(user: dict = Depends(current_user)):
     data, ts = _load_kind(user["id"], "settings", "")
-    return {"ok": True, "data": data, "updatedAt": ts}
+    return {"ok": True, "data": data, "updatedAt": _logical_ts(data, ts)}
 
 
 @app.put("/api/settings")
 def put_settings(body: SettingsIn, user: dict = Depends(current_user)):
     ts = _save_kind(user["id"], "settings", "", body.data)
-    return {"ok": True, "data": body.data, "updatedAt": ts}
+    up = _logical_ts(body.data, ts)
+    _broadcast(user["id"], {
+        "type": "data",
+        "kind": "settings",
+        "courseId": "",
+        "senderId": body.clientId,
+        "data": body.data,
+        "updatedAt": up,
+    })
+    return {"ok": True, "data": body.data, "updatedAt": up}
+
+
+# ---------- WebSocket 实时同步（多端互通） ----------
+_WS = {}                 # user_id -> set[asyncio.Queue]
+_WS_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+@app.on_event("startup")
+async def _ws_capture_loop():
+    global _WS_LOOP
+    _WS_LOOP = asyncio.get_running_loop()
+
+
+def _broadcast(user_id: int, payload: dict) -> None:
+    """推送给该用户的所有在线设备；PUT 跑在线程池里，必须调度回事件循环。"""
+    loop = _WS_LOOP
+    if loop is None or loop.is_closed():
+        return
+
+    def _push():
+        for q in list(_WS.get(user_id, ())):
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass   # 慢客户端：丢帧，收端依赖重连时的补拉兜底
+
+    try:
+        loop.call_soon_threadsafe(_push)
+    except RuntimeError:
+        pass
+
+
+@app.websocket("/ws/sync")
+async def ws_sync(ws: WebSocket):
+    """每设备一条长连接：推送走服务端广播，收端按 updatedAt 择新。"""
+    user = _user_by_token(ws.cookies.get(auth.COOKIE_NAME))
+    if not user:
+        await ws.close(code=1008, reason="unauthorized")
+        return
+    await ws.accept()
+    uid = user["id"]
+    q: asyncio.Queue = asyncio.Queue(maxsize=64)
+    _WS.setdefault(uid, set()).add(q)
+    try:
+        await ws.send_json({"type": "hello", "userId": uid, "serverTs": int(time.time() * 1000)})
+
+        async def _sender():
+            while True:
+                await ws.send_json(await q.get())
+
+        async def _receiver():
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "ping":
+                    await ws.send_json({"type": "pong", "serverTs": int(time.time() * 1000)})
+
+        tasks = [asyncio.create_task(_sender()), asyncio.create_task(_receiver())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _WS.get(uid, set()).discard(q)
+        if not _WS.get(uid):
+            _WS.pop(uid, None)
 
 
 @app.get("/api/export")
