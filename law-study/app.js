@@ -194,7 +194,7 @@
     state = emptyState();
     state.wipedAt = Date.now();                          // 墓碑：让服务端并集丢弃重置前的已读与自测
     quizRun = null;                                   // 防止残留作答态把成绩写回新进度
-    try { if (COURSE) localStorage.removeItem(progressKey(COURSE.id)); } catch (e) {}
+    try { if (COURSE) localStorage.removeItem(progressKey(COURSE.id)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     saveState();
   }
 
@@ -203,15 +203,15 @@
     try {
       var s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
       if (s && typeof s === "object") return { theme: s.theme || "light", fontScale: Number(s.fontScale) || 1 };
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     try {
       var p = JSON.parse(localStorage.getItem(LEGACY_PROGRESS_KEY) || "null");
       if (p && p.settings) return { theme: p.settings.theme || "light", fontScale: Number(p.settings.fontScale) || 1 };
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     return { theme: "light", fontScale: 1 };
   }
   function saveSettings() {
-    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     scheduleSync("settings");
   }
 
@@ -229,7 +229,7 @@
         isAdmin: !!user.isAdmin,
         at: Date.now()
       }));
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
   }
   function readCachedSession() {
     try {
@@ -240,7 +240,7 @@
     } catch (e) { return null; }
   }
   function clearCachedSession() {
-    try { localStorage.removeItem(SESSION_CACHE_KEY); } catch (e) {}
+    try { localStorage.removeItem(SESSION_CACHE_KEY); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
   }
   var syncTimers = {};
   var SYNC_DELAY = 900;
@@ -289,15 +289,15 @@
         if (kind === "settings") {
           settings = Object.assign({ theme: "light", fontScale: 1 }, res.data);
           applyTheme(settings.theme); applyFont(settings.fontScale);
-          try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+          try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         } else if (kind === "drill") {
           var running = (drill && drill.session) || null;
           drill = Object.assign(drill || {}, res.data);
           if (running) drill.session = running;   // 合并结果不带进行中会话，不得顶掉（否则后续点选静默失效）
-          try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) {}
+          try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         } else {
           state = Object.assign(state || {}, res.data);
-          try { localStorage.setItem(progressKey(courseId), JSON.stringify(state)); } catch (e) {}
+          try { localStorage.setItem(progressKey(courseId), JSON.stringify(state)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         }
       })
       .catch(function () { /* 离线时静默，本地已保存 */ });
@@ -323,7 +323,7 @@
         var localUp = Number((state && state.updatedAt) || 0);
         if (serverUp >= localUp || !localUp) {
           state = Object.assign({}, sp.data);
-          try { localStorage.setItem(progressKey(courseId), JSON.stringify(state)); } catch (e) {}
+          try { localStorage.setItem(progressKey(courseId), JSON.stringify(state)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         } else {
           scheduleSync("progress");   // 本地更新：回推服务端收敛（如离线期间的进度）
         }
@@ -335,7 +335,7 @@
           scheduleSync("drill");      // 刷题进行中不覆盖本地会话，但服务端需收敛
         } else if (serverDrillUp >= localDrillUp || !localDrillUp) {
           drill = Object.assign({}, sd.data);
-          try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) {}
+          try { localStorage.setItem(drillKey(courseId), JSON.stringify(drill)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         } else {
           scheduleSync("drill");
         }
@@ -373,7 +373,7 @@
       if (settings && settings.theme === ns.theme && Number(settings.fontScale) === ns.fontScale) return false;
       settings = ns;
       applyTheme(settings.theme); applyFont(settings.fontScale);
-      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
       return true;
     }
     if (kind !== "progress" && kind !== "drill") return false;
@@ -384,15 +384,15 @@
       if (cur && up && up < Number(cur.updatedAt || 0)) return false;  // 本端更新更优，忽略旧推
       if (kind === "progress") {
         state = Object.assign({}, msg.data);
-        try { localStorage.setItem(progressKey(cid), JSON.stringify(state)); } catch (e) {}
+        try { localStorage.setItem(progressKey(cid), JSON.stringify(state)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
       } else {
         drill = Object.assign({}, msg.data);
-        try { localStorage.setItem(drillKey(cid), JSON.stringify(drill)); } catch (e) {}
+        try { localStorage.setItem(drillKey(cid), JSON.stringify(drill)); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
       }
       var r = parseHash();
       var inQuiz = (r.name === "quiz" && quizRun);
       var inDrillRun = (r.name === "drill" && drill && drill.session && (r.parts || [])[0] === "run");
-      if (!inQuiz && !inDrillRun) { try { render(); } catch (e) {} }   // 作答中不打断（自测/刷题同等待遇）
+      if (!inQuiz && !inDrillRun) { try { render(); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); } }   // 作答中不打断（自测/刷题同等待遇）
       return true;
     }
     // 非当前课程：只写本地副本，首页卡片计数重渲后即正确
@@ -402,7 +402,7 @@
       if (old && up && up < Number(old.updatedAt || 0)) return false;
       localStorage.setItem(key, JSON.stringify(msg.data));
     } catch (e) { return false; }
-    try { render(); } catch (e) {}
+    try { render(); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     return true;
   }
 
@@ -459,14 +459,14 @@
       WS_RETRY = 0;
       clearInterval(WS_PING);
       WS_PING = setInterval(function () {
-        try { if (WS_CONN && WS_CONN.readyState === 1) WS_CONN.send(JSON.stringify({ type: "ping" })); } catch (e) {}
+        try { if (WS_CONN && WS_CONN.readyState === 1) WS_CONN.send(JSON.stringify({ type: "ping" })); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
       }, 30000);
     };
     sock.onmessage = function (ev) {
       var msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      try { onSyncMessage(msg); } catch (e) {}
+      try { onSyncMessage(msg); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     };
-    sock.onerror = function () { try { sock.close(); } catch (e) {} };
+    sock.onerror = function () { try { sock.close(); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); } };
     sock.onclose = function () {
       if (WS_CONN === sock) WS_CONN = null;
       clearInterval(WS_PING); WS_PING = null;
@@ -485,7 +485,7 @@
     for (var k in syncTimers) {
       if (!Object.prototype.hasOwnProperty.call(syncTimers, k) || !syncTimers[k]) continue;
       clearTimeout(syncTimers[k]); syncTimers[k] = null;
-      try { syncKind(k); } catch (e) {}
+      try { syncKind(k); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     }
   }
   var syncTriggersBound = false;
@@ -504,7 +504,7 @@
   function closeSync() {      // 登出时断开；重连受 AUTH.user 门槛保护不会复活
     clearTimeout(WS_RETRY_TIMER);
     clearInterval(WS_PING);
-    if (WS_CONN) { try { WS_CONN.onclose = null; WS_CONN.close(); } catch (e) {} WS_CONN = null; }
+    if (WS_CONN) { try { WS_CONN.onclose = null; WS_CONN.close(); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); } WS_CONN = null; }
   }
 
   /* ========== 4. 横幅 / 主题 / 字号 ========== */
@@ -685,9 +685,9 @@
       try {
         var old = JSON.parse(localStorage.getItem(LEGACY_PROGRESS_KEY) || "null");
         if (old && old.settings && !localStorage.getItem(SETTINGS_KEY)) localStorage.setItem(SETTINGS_KEY, JSON.stringify(old.settings));
-      } catch (e) {}
+      } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
       localStorage.setItem("app:migrated:v1", "1");
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
   }
 
   var courseReq = 0;
@@ -703,7 +703,7 @@
       BANK = normalizeBank(pack.bank);
       ARTICLES = (pack.articles && typeof pack.articles === "object") ? pack.articles : {};
       if (warnings.length) {                           // 内容损坏时明示，不再静默
-        try { console.warn("[内容校验] 已跳过 " + warnings.length + " 条无效数据", warnings.slice()); } catch (e) {}
+        try { console.warn("[内容校验] 已跳过 " + warnings.length + " 条无效数据", warnings.slice()); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
         showBanner("教材数据有 " + warnings.length + " 处异常，已自动跳过，不影响使用。");
       }
       quizRun = null;                                  // 切课程时丢弃上一课的作答状态
@@ -753,7 +753,7 @@
     try {
       var s = JSON.parse(localStorage.getItem(progressKey(cid)) || "null");
       if (s && s.read) done = Object.keys(s.read).length;
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
     return { done: done };
   }
   function renderHall() {
@@ -871,7 +871,7 @@
       h("button", { class: "btn primary block", type: "button", style: "margin-top:10px", onclick: submit }, "登录")
     ]));
     p.addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
-    setTimeout(function () { try { u.focus(); } catch (e) {} }, 50);
+    setTimeout(function () { try { u.focus(); } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); } }, 50);
   }
 
   /* ========== 7. 视图：目录 ========== */
@@ -1518,7 +1518,7 @@
     } else if (mode === "chapter") {
       pool = (BANK.byChapter[opts.chapterId] || []).slice();
     } else if (mode === "wrong") {
-      pool = BANK.questions.filter(function (q) { return !!drill.wrong[q.id]; });
+      pool = BANK.questions.concat(BANK.adv || []).filter(function (q) { return !!drill.wrong[q.id]; });
     } else if (mode === "adv") {
       pool = (BANK.adv || []).filter(function (q) { return !opts.chapters || opts.chapters.indexOf(q.chapterId) >= 0; });
     } else {
@@ -1961,7 +1961,7 @@
       var ok = cs && cs.borderTopLeftRadius !== "" && parseFloat(cs.borderTopLeftRadius) >= 6;
       document.body.removeChild(probe);
       if (!ok) showBanner("样式表可能未加载（styles.css），建议强制刷新（Ctrl/Cmd+Shift+R）。");
-    } catch (e) {}
+    } catch (e) { console.warn('[law-study] 5ffd75655f025e38', e); }
   }
 
   function bindUI() {

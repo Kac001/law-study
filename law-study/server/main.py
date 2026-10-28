@@ -75,14 +75,23 @@ def admin_user(user: dict = Depends(current_user)) -> dict:
     return user
 
 
-def set_session_cookie(response: Response, token: str) -> None:
+def _cookie_secure(request: Request) -> bool:
+    """Cookie secure 随链路自动开启：https（含反代终止 TLS 的 X-Forwarded-Proto）即带；env 可强制。"""
+    if COOKIE_SECURE:
+        return True
+    if (request.headers.get("x-forwarded-proto") or "").lower() == "https":
+        return True
+    return request.url.scheme == "https"
+
+
+def set_session_cookie(response: Response, token: str, request: Request) -> None:
     response.set_cookie(
         key=auth.COOKIE_NAME,
         value=token,
         max_age=auth.SESSION_TTL,
         httponly=True,
         samesite="lax",
-        secure=COOKIE_SECURE,
+        secure=_cookie_secure(request),
         path="/",
     )
 
@@ -114,7 +123,7 @@ def login(body: LoginIn, request: Request, response: Response):
     )
     conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (_now(), row["id"]))
     conn.commit()
-    set_session_cookie(response, token)
+    set_session_cookie(response, token, request)
     return {"ok": True, "user": {"username": row["username"]}}
 
 
@@ -268,6 +277,8 @@ def get_settings(user: dict = Depends(current_user)):
 
 @app.put("/api/settings")
 def put_settings(body: SettingsIn, user: dict = Depends(current_user)):
+    if len(merge.dumps(body.data)) > MAX_PAYLOAD:
+        raise HTTPException(status_code=413, detail="数据过大")
     ts = _save_kind(user["id"], "settings", "", body.data)
     up = _logical_ts(body.data, ts)
     _broadcast(user["id"], {

@@ -502,10 +502,10 @@ function typographyScenario() {
     const html = R(s.body, { labels: true });
     const n = (html.match(/<h4>/g) || []).length;
     secs++; h4 += n;
-    if (n !== 6 || new RegExp('<p>' + LAB + '[：:]').test(html)) bad.push(s.id);
+    if (n !== 7 || new RegExp('<p>' + LAB + '[：:]').test(html)) bad.push(s.id);
   }
-  ok('[排版] 宪法 63 节每节 6 个小标题', secs === 63 && bad.length === 0, { secs, bad: bad.slice(0, 4) });
-  ok('[排版] 宪法小标题总数 378', h4 === 378, h4);
+  ok('[排版] 宪法 63 节每节 7 个小标题（6 标签 + 进阶）', secs === 63 && bad.length === 0, { secs, bad: bad.slice(0, 4) });
+  ok('[排版] 宪法小标题总数 441', h4 === 441, h4);
   ok('[排版] 宪法段落不与标签粘连', !new RegExp('<p>' + LAB + '[：:]').test(R(cl.chapters[0].sections[0].body, { labels: true })));
 
   // 2) 刑法：与原渲染逐字节一致，h4 数等于源码 `###` 数
@@ -613,6 +613,10 @@ function realtimeSyncScenario() {
   ok('[实时] 本地更新回推收敛', /else \{\s*scheduleSync\("progress"\);\s*\/\/ 本地更新/.test(appSrc));
   ok('[进阶] 题库独立数组 advQuestions', appSrc.indexOf('raw.advQuestions') >= 0 && appSrc.indexOf('b.adv.push') >= 0);
   ok('[进阶] 刷题入口与作答池', appSrc.indexOf('进阶刷题') >= 0 && /mode === "adv"/.test(appSrc));
+  ok('[审计修复] 错题重刷池含进阶题', /BANK\.questions\.concat\(BANK\.adv \|\| \[\]\)/.test(appSrc));
+  ok('[审计修复] settings 体积上限', /def put_settings[\s\S]{0,220}MAX_PAYLOAD/.test(srvSrc));
+  ok('[审计修复] Cookie secure 随 https 自动开启', srvSrc.indexOf('x-forwarded-proto') >= 0 && srvSrc.indexOf('_cookie_secure') >= 0);
+  ok('[审计修复] 空 catch 全部带日志', appSrc.indexOf('catch (e) {}') < 0 && /catch \(e\) \{ console\.warn/.test(appSrc));
   ok('[刷题] 会话归一化防锁死', /s\.session = null;/.test(appSrc) && /s\.answers = Array\.isArray\(s\.answers\)/.test(appSrc));
   ok('[刷题] 作答页免远端重渲', /inDrillRun/.test(appSrc));
   ok('[刷题] 同步回写不顶掉进行中会话', /if \(running\) drill\.session = running;/.test(appSrc));
